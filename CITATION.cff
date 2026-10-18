@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this code or the results, please cite it as below."
+title: "Rate as a Feature, Not a Nuisance: Curriculum-FiLM Event GNN (CEGNN)"
+# TODO(authors): fill in names, venue and DOI once the paper de-anonymises.
+authors:
+  - name: "The CEGNN authors"
+version: 0.1.0
+date-released: 2026-10-17
+license: MIT
+repository-code: "https://github.com/KAVYANSHTYAGI/CE-GNN"

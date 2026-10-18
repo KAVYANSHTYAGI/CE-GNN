@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cegnn"
+version = "0.1.0"
+description = "Curriculum-FiLM Event GNN: event rate as a feature, not a nuisance"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+# PyTorch / PyG / torch-cluster / torch-scatter are CUDA-specific wheels: install them first
+# (see environment.yml), then `pip install -e .`
+dependencies = [
+  "numpy", "pyyaml", "tqdm", "scipy", "scikit-learn", "pandas", "matplotlib",
+  "expelliarmus",  # Prophesee .dat reader (N-Cars)
+  "tonic",         # DVS128 Gesture loader
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["cegnn*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::UserWarning"]

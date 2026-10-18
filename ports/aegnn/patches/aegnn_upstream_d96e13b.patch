@@ -1,0 +1,1297 @@
+diff --git a/aegnn/datasets/base/event_dm.py b/aegnn/datasets/base/event_dm.py
+index b9a5c74..93e0977 100644
+--- a/aegnn/datasets/base/event_dm.py
++++ b/aegnn/datasets/base/event_dm.py
+@@ -32,13 +32,13 @@ class EventDataModule(pl.LightningDataModule):
+ 
+     def prepare_data(self) -> None:
+         logging.info("Preparing datasets for loading")
+-        self._prepare_dataset("training")
+-        self._prepare_dataset("validation")
++        self._prepare_dataset("train")
++        self._prepare_dataset("test")
+ 
+     def setup(self, stage: Optional[str] = None):
+         logging.debug("Load and set up datasets")
+-        self.train_dataset = self._load_dataset("training")
+-        self.val_dataset = self._load_dataset("validation")
++        self.train_dataset = self._load_dataset("train")
++        self.val_dataset = self._load_dataset("test")
+         if len(self.train_dataset) == 0 or len(self.val_dataset) == 0:
+             raise UserWarning("No data found, check AEGNN_DATA_DIR environment variable!")
+ 
+diff --git a/aegnn/datasets/ncaltech101.py b/aegnn/datasets/ncaltech101.py
+index 0a4a425..bd7ba5a 100644
+--- a/aegnn/datasets/ncaltech101.py
++++ b/aegnn/datasets/ncaltech101.py
+@@ -1,181 +1,433 @@
+ import functools
+ import glob
+-import logging
++import multiprocessing as mp
+ import numpy as np
+ import os
+ import torch
++ 
++from torch_geometric.data import Data
++from torch_geometric.nn.pool import radius_graph
++from tqdm import tqdm
++from typing import Callable, List, Optional, Union
++ 
++from .base.event_dm import EventDataModule
++from .utils.normalization import normalize_time
++ 
++ 
++# ── paths ──────────────────────────────────────────────────────────────────────
++_TRAIN_DIR     = os.path.join(os.environ.get("CEGNN_DATA_ROOT", "data"), "new_split/train")
++_TEST_DIR      = os.path.join(os.environ.get("CEGNN_DATA_ROOT", "data"), "new_split/test")
++_PROCESSED_DIR = os.path.join(os.environ.get("CEGNN_DATA_ROOT", "data"), "main_split_claude/processed_3d_10k")
++# ──────────────────────────────────────────────────────────────────────────────
++ 
++ 
++class NCaltech101(EventDataModule):
++ 
++    def __init__(self, batch_size: int = 64, shuffle: bool = True, num_workers: int = 8,
++                 pin_memory: bool = False, transform: Optional[Callable[[Data], Data]] = None):
++        # FIX: img_shape is (width, height) = (x_max, y_max) for N-Caltech101
++        super().__init__(img_shape=(240, 180), batch_size=batch_size, shuffle=shuffle,
++                         num_workers=num_workers, pin_memory=pin_memory, transform=transform)
++ 
++        # FIX: tuned to match reference AEGNN scale.
++        # Coordinates stay in pixel-like units (x: 0..240, y: 0..180, t: beta-rescaled µs).
++        # With beta=0.5e-5 and t in µs, a 50ms window spans t ≈ [0, 0.25] — on the same
++        # order of magnitude as a ~3-pixel radius, so r=3 makes metric sense.
++        pre_processing_params = {
++            "r": 5.0,
++            "d_max": 32,
++            "n_samples": 10000,
++            "sampling": True,
++        }
++        self.save_hyperparameters({"preprocessing": pre_processing_params})
++ 
++    @staticmethod
++    def read_label(raw_file: str) -> Optional[Union[str, List[str]]]:
++        return raw_file.split("/")[-2]
++ 
++    @staticmethod
++    def load(raw_file: str) -> Data:
++        with open(raw_file, "rb") as f:
++            raw_data = np.fromfile(f, dtype=np.uint8)
++        raw_data = np.uint32(raw_data)
++ 
++        # FIX 1: byte 0 is x, byte 1 is y (was swapped).
++        all_x = raw_data[0::5]
++        all_y = raw_data[1::5]
++        all_p = (raw_data[2::5] & 128) >> 7
++        all_ts = ((raw_data[2::5] & 127) << 16) | (raw_data[3::5] << 8) | (raw_data[4::5])
++ 
++        # FIX 2: DO NOT divide by 1e6. normalize_time() expects microseconds.
++        # Keeping t in µs is what makes beta=0.5e-5 land in the right range.
++        all_ts = all_ts.astype(np.float64)
++ 
++        all_p = all_p.astype(np.float64)
++        all_p[all_p == 0] = -1
++ 
++        events = np.column_stack((all_x, all_y, all_ts, all_p))
++        events = torch.from_numpy(events).float()
++ 
++        # FIX 3: node features = polarity only (1-d). Reference AEGNN does this.
++        # Putting t in x was redundant (already in pos) and scale-broken.
++        x = events[:, 3:4]  # polarity, shape [N, 1]
++ 
++        # pos = (x, y, t) — same convention as reference.
++        pos = events[:, :3]
++ 
++        return Data(x=x, pos=pos)
++ 
++    @functools.lru_cache(maxsize=100)
++    def map_label(self, label: str) -> int:
++        label_dict = {lbl: i for i, lbl in enumerate(self.classes)}
++        return label_dict.get(label, None)
++ 
++    def _prepare_dataset(self, mode: str):
++        out_dir = os.path.join(_PROCESSED_DIR, "train" if mode == "train" else "test")
++        raw_files = self.raw_files(mode)
++        class_dict = {cls: i for i, cls in enumerate(self.classes)}
++ 
++        jobs = []
++        for rf in raw_files:
++            cls_name = os.path.basename(os.path.dirname(rf))
++            fname = os.path.splitext(os.path.basename(rf))[0] + ".pt"
++            pf = os.path.join(out_dir, cls_name, fname)
++            if not os.path.exists(pf):
++                jobs.append((rf, pf, class_dict, self.hparams.preprocessing))
++ 
++        if not jobs:
++            print(f"All files processed for {mode}")
++            return
++ 
++        print(f"Processing {len(jobs)} files for {mode}")
++        for _, pf, _, _ in jobs:
++            os.makedirs(os.path.dirname(pf), exist_ok=True)
++ 
++        n_workers = min(self.num_workers or os.cpu_count(), len(jobs))
++        with mp.Pool(processes=n_workers) as pool:
++            for _ in tqdm(pool.imap_unordered(_process_one, jobs, chunksize=1),
++                          total=len(jobs)):
++                pass
++ 
++    def raw_files(self, mode: str) -> List[str]:
++        raw_dir = _TRAIN_DIR if mode == "train" else _TEST_DIR
++        return glob.glob(os.path.join(raw_dir, "*", "*.bin"))
++ 
++    @property
++    def classes(self) -> List[str]:
++        return sorted(os.listdir(_TRAIN_DIR))
++ 
++ 
++# ========================= CORE PROCESS =========================
++ 
++def _process_one(args):
++    rf, pf, class_dict, params = args
++ 
++    try:
++        data = NCaltech101.load(rf)
++        data.file_id = os.path.basename(rf)
++ 
++        label = NCaltech101.read_label(rf)
++        if label is not None:
++            data.y = torch.tensor([class_dict[label]])
++ 
++        if data.num_nodes < 2:
++            raise ValueError(f"Too few events: {rf}")
++ 
++        # FIX 4: guarantee monotonic timestamps before searchsorted.
++        # (N-Caltech101 files are usually sorted, but not always; searchsorted fails silently.)
++        if not torch.all(data.pos[1:, 2] >= data.pos[:-1, 2]):
++            order = data.pos[:, 2].argsort()
++            data.pos = data.pos[order]
++            data.x = data.x[order]
++ 
++        # FIX 5: take the LAST 50ms (not a middle window). Timestamps are in µs here,
++        # so 50ms = 50_000 µs.
++        WINDOW_US = 50_000.0
++        t_end = data.pos[-1, 2]
++        t_start = t_end - WINDOW_US
++ 
++        # idx0 = first event with t >= t_start; idx1 = one past the last event.
++        idx0 = int(torch.searchsorted(data.pos[:, 2], t_start).item())
++        idx1 = data.num_nodes
++ 
++        if idx1 - idx0 < 10:
++            raise ValueError(f"Too few events in 50ms window: {rf}")
++ 
++        data.pos = data.pos[idx0:idx1]
++        data.x = data.x[idx0:idx1]
++        data.num_nodes = data.x.size(0)
++ 
++        # ---------- sampling ----------
++        num_nodes = data.num_nodes
++        n_samples = params["n_samples"]
++ 
++        if num_nodes >= n_samples:
++            # sample without replacement
++            choice = torch.randperm(num_nodes)[:n_samples]
++        else:
++            # FIX 6: sample WITH replacement instead of perm.repeat(), which created
++            # exact duplicate nodes at identical (x,y,t) → zero-distance self-edges
++            # in the radius graph. randint gives random duplication that at least
++            # doesn't produce collocated points in overwhelming numbers.
++            keep = torch.arange(num_nodes)
++            extra = torch.randint(0, num_nodes, (n_samples - num_nodes,))
++            choice = torch.cat([keep, extra])
++ 
++        data.x = data.x[choice]
++        data.pos = data.pos[choice]
++        data.num_nodes = data.x.size(0)
++ 
++        # ---------- normalization ----------
++        # Time: beta-rescale microseconds → roughly [0, 0.25] for a 50ms window.
++        # This is the ONLY rescaling. x and y stay in pixel units (0..240, 0..180).
++        data.pos[:, 2] = normalize_time(data.pos[:, 2])
++        # DO NOT divide x by 240 or y by 180 — that would mismatch scales with t
++        # and break the radius graph metric. Reference AEGNN leaves them in pixels.
++ 
++        # ---------- radius graph ----------
++        # With x,y in pixels and t in [0, ~0.25], r=3 gives a 3-pixel spatial radius
++        # that also implicitly spans the whole temporal window (since t_max ≪ 3).
++        # This matches the reference implementation's geometric regime.
++        data.edge_index = radius_graph(
++            data.pos,
++            r=params["r"],
++            max_num_neighbors=params["d_max"],
++            loop=False,
++        )
++ 
++        if data.edge_index.size(1) == 0:
++            raise ValueError(f"No edges: {rf}")
++ 
++        # ---------- edge features ----------
++        # FIX 7: normalize with the GLOBAL radius r, not per-graph max.
++        # Per-graph max made every graph's edge scale identical, destroying the
++        # absolute-shape signal the classifier needs.
++        src, dst = data.edge_index
++        delta = data.pos[dst] - data.pos[src]
++        data.edge_attr = ((delta / (2.0 * params["r"])) + 0.5).float().clamp(0.0, 1.0)
++ 
++        torch.save(data, pf)
++ 
++    except Exception as e:
++        print(f"[ERROR] {rf}: {e}", flush=True)
++        raise e
++ 
++
++
+ 
++
++
++
++
++
++
++'''import functools
++import glob
++import logging
++import multiprocessing as mp
++import numpy as np
++import os
++import torch
++ 
+ from torch_geometric.data import Data
+ from torch_geometric.nn.pool import radius_graph
+-from torch_geometric.transforms import FixedPoints
+ from tqdm import tqdm
+ from typing import Callable, Dict, List, Optional, Union
+-
++ 
+ from aegnn.utils.multiprocessing import TaskManager
+ from .base.event_dm import EventDataModule
+ from .utils.normalization import normalize_time
++ 
++ 
++ 
++# ── only edit these three ──────────────────────────────────────────────────────
++_TRAIN_DIR     = os.path.join(os.environ.get("CEGNN_DATA_ROOT", "data"), "new_split_new/train")
++_TEST_DIR      = os.path.join(os.environ.get("CEGNN_DATA_ROOT", "data"), "new_split_new/test")
++_PROCESSED_DIR = os.path.join(os.environ.get("CEGNN_DATA_ROOT", "data"), "main_split_new_final/processed_3d_10k")
++# ──────────────────────────────────────────────────────────────────────────────
++ 
+ 
+-
++ 
+ class NCaltech101(EventDataModule):
+-
++ 
+     def __init__(self, batch_size: int = 64, shuffle: bool = True, num_workers: int = 8,
+                  pin_memory: bool = False, transform: Optional[Callable[[Data], Data]] = None):
+         super(NCaltech101, self).__init__(img_shape=(240, 180), batch_size=batch_size, shuffle=shuffle,
+                                           num_workers=num_workers, pin_memory=pin_memory, transform=transform)
+-        pre_processing_params = {"r": 5.0, "d_max": 32, "n_samples": 25000, "sampling": True}
++        pre_processing_params = {"r": 5.0, "d_max": 32, "n_samples": 10000, "sampling": True}
+         self.save_hyperparameters({"preprocessing": pre_processing_params})
+-
++ 
+     def read_annotations(self, raw_file: str) -> Optional[np.ndarray]:
+         annotations_dir = os.path.join(os.environ["AEGNN_DATA_DIR"], "ncaltech101", "annotations")
+         raw_file_name = os.path.basename(raw_file).replace("image", "annotation")
+         raw_dir_name = os.path.basename(os.path.dirname(raw_file))
+         annotation_file = os.path.join(os.path.join(annotations_dir, raw_dir_name, raw_file_name))
+-
++ 
++        if not os.path.exists(annotation_file):
++            return None
++ 
+         f = open(annotation_file)
+         annotations = np.fromfile(f, dtype=np.int16)
+         annotations = np.array(annotations[2:10])
+         f.close()
+-
++ 
+         label = self.read_label(raw_file)
+         class_id = self.map_label(label)
+         if class_id is None:
+             return None
+-
+-        # Create bounding box from corner, shape and label variables. NCaltech101 bounding boxes
+-        # often start outside of the frame (negative corner coordinates). However, the shape turns
+-        # out to be the shape of the bbox starting at the image's frame.
++ 
+         bbox = np.array([
+-            annotations[0], annotations[1],  # upper-left corner
+-            annotations[2] - annotations[0],  # width
+-            annotations[5] - annotations[1],  # height
++            annotations[0], annotations[1],
++            annotations[2] - annotations[0],
++            annotations[5] - annotations[1],
+             class_id
+         ])
+         bbox[:2] = np.maximum(bbox[:2], 0)
+         return bbox.reshape((1, 1, -1))
+-
++ 
+     @staticmethod
+     def read_label(raw_file: str) -> Optional[Union[str, List[str]]]:
+         return raw_file.split("/")[-2]
+-
++ 
+     @staticmethod
+     def load(raw_file: str) -> Data:
+         f = open(raw_file, 'rb')
+         raw_data = np.fromfile(f, dtype=np.uint8)
+         f.close()
+-
++ 
+         raw_data = np.uint32(raw_data)
+         all_y = raw_data[1::5]
+         all_x = raw_data[0::5]
+-        all_p = (raw_data[2::5] & 128) >> 7  # bit 7
++        all_p = (raw_data[2::5] & 128) >> 7
+         all_ts = ((raw_data[2::5] & 127) << 16) | (raw_data[3::5] << 8) | (raw_data[4::5])
+         all_ts = all_ts / 1e6  # µs -> s
+         all_p = all_p.astype(np.float64)
+         all_p[all_p == 0] = -1
+         events = np.column_stack((all_x, all_y, all_ts, all_p))
+-        events = torch.from_numpy(events).float().cuda()
+-
+-        x, pos = events[:, -1:], events[:, :3]   # x = polarity, pos = spatio-temporal position
++        events = torch.from_numpy(events).float()
++ 
++        x, pos = events[:, -1:], events[:, :3]
+         return Data(x=x, pos=pos)
+-
++ 
+     @functools.lru_cache(maxsize=100)
+     def map_label(self, label: str) -> int:
+         label_dict = {lbl: i for i, lbl in enumerate(self.classes)}
+         return label_dict.get(label, None)
+-
++ 
+     def _load_processed_file(self, f_path: str) -> Data:
+         return torch.load(f_path)
+-
+-    #########################################################################################################
+-    # Processing ############################################################################################
+-    #########################################################################################################
++ 
+     def _prepare_dataset(self, mode: str):
+-        processed_dir = os.path.join(self.root, "processed")
++        out_dir = os.path.join(_PROCESSED_DIR, "train" if mode == "train" else "test")
++ 
+         raw_files = self.raw_files(mode)
+         class_dict = {class_id: i for i, class_id in enumerate(self.classes)}
+-        kwargs = dict(load_func=self.load, class_dict=class_dict, pre_transform=self.pre_transform,
+-                      read_label=self.read_label, read_annotations=self.read_annotations)
+         logging.debug(f"Found {len(raw_files)} raw files in dataset (mode = {mode})")
+-
+-        task_manager = TaskManager(self.num_workers, queue_size=self.num_workers)
+-        processed_files = []
+-        for rf in tqdm(raw_files):
+-            processed_file = rf.replace(self.root, processed_dir)
+-            processed_files.append(processed_file)
+-
+-            if os.path.exists(processed_file):
+-                continue
+-            task_manager.queue(self.processing, rf=rf, pf=processed_file, **kwargs)
+-        task_manager.join()
+-
++ 
++        jobs = []
++        for rf in raw_files:
++            cls_name = os.path.basename(os.path.dirname(rf))
++            fname    = os.path.splitext(os.path.basename(rf))[0] + ".pt"
++            pf       = os.path.join(out_dir, cls_name, fname)
++            if not os.path.exists(pf):
++                jobs.append((rf, pf))
++ 
++        if not jobs:
++            logging.info(f"All {len(raw_files)} files already processed for mode={mode}.")
++            return
++ 
++        logging.info(f"Processing {len(jobs)} / {len(raw_files)} files (mode={mode}) …")
++ 
++        for _, pf in jobs:
++            os.makedirs(os.path.dirname(pf), exist_ok=True)
++ 
++        worker_args = [
++            (rf, pf, class_dict, self.hparams.preprocessing)
++            for rf, pf in jobs
++        ]
++ 
++        n_workers = min(self.num_workers or os.cpu_count(), len(jobs))
++        with mp.Pool(processes=n_workers) as pool:
++            for _ in tqdm(
++                pool.imap_unordered(_process_one, worker_args, chunksize=4),
++                total=len(jobs),
++                desc=f"Preprocessing {mode}",
++            ):
++                pass
++ 
++    def raw_files(self, mode: str) -> List[str]:
++        raw_dir = _TRAIN_DIR if mode == "train" else _TEST_DIR
++        return glob.glob(os.path.join(raw_dir, "*", "*.bin"), recursive=True)
++ 
++    def processed_files(self, mode: str) -> List[str]:
++        out_dir = os.path.join(_PROCESSED_DIR, "train" if mode == "train" else "test")
++        return glob.glob(os.path.join(out_dir, "*", "*.pt"))
++ 
++    @property
++    def classes(self) -> List[str]:
++        return sorted(os.listdir(_TRAIN_DIR))
++    
+     @staticmethod
+-    def processing(rf: str, pf: str, load_func: Callable[[str], Data],
+-                   class_dict: Dict[str, int], read_label: Callable[[str], str],
+-                   read_annotations: Callable[[str], np.ndarray], pre_transform: Callable = None):
+-        rf_wo_ext, _ = os.path.splitext(rf)
+-
+-        # Load data from raw file. If the according loaders are available, add annotation, label and class id.
+-        device = "cpu"  # torch.device(torch.cuda.current_device())
+-        data_obj = load_func(rf).to(device)
++    def sub_sampling(data: Data, n_samples: int, sub_sample: bool) -> Data:
++        num_nodes = data.x.size(0)
++        if sub_sample:
++            replace = num_nodes < n_samples
++            choice = torch.from_numpy(
++                np.random.choice(num_nodes, n_samples, replace=replace)
++            ).long()
++        else:
++            choice = torch.arange(min(n_samples, num_nodes))
++        data.x = data.x[choice]
++        data.pos = data.pos[choice]
++        data.num_nodes = data.x.size(0)
++        return data
++ 
++ 
++def _process_one(args):
++    """Processes one raw .bin file and saves as .pt with 3D spatio-temporal edge features."""
++    rf, pf, class_dict, preproc_params = args
++    try:
++        data_obj = NCaltech101.load(rf)
+         data_obj.file_id = os.path.basename(rf)
+-        if (label := read_label(rf)) is not None:
++ 
++        label = NCaltech101.read_label(rf)
++        if label is not None:
+             data_obj.label = label if isinstance(label, list) else [label]
+-            data_obj.y = torch.tensor([class_dict[label] for label in data_obj.label])
+-        if (bbox := read_annotations(rf)) is not None:
+-            data_obj.bbox = torch.tensor(bbox, device=device).long()
+-
+-        # Apply the pre-transform on the graph, to afterwards store it as .pt-file.
+-        assert data_obj.pos.size(1) == 3, "pos must consist of (x, y, t)"
+-        if pre_transform is not None:
+-            data_obj = pre_transform(data_obj)
+-
+-        # Save the data object as .pt-torch-file. For the sake of a uniform processed
+-        # directory format make all output paths flat.
+-        os.makedirs(os.path.dirname(pf), exist_ok=True)
+-        torch.save(data_obj.to("cpu"), pf)
+-
+-    def pre_transform(self, data: Data) -> Data:
+-        params = self.hparams.preprocessing
+-
+-        # Cut-off window of highest increase of events.
+-        window_us = 50 * 1000
++            data_obj.y = torch.tensor([class_dict[lbl] for lbl in data_obj.label])
++ 
++        # pre_transform: temporal windowing
++        data = data_obj
++        window_s = 50e-3
+         t = data.pos[data.num_nodes // 2, 2]
+-        index1 = torch.clamp(torch.searchsorted(data.pos[:, 2].contiguous(), t) - 1, 0, data.num_nodes - 1)
+-        index0 = torch.clamp(torch.searchsorted(data.pos[:, 2].contiguous(), t-window_us) - 1, 0, data.num_nodes - 1)
++        index1 = int(torch.clamp(torch.searchsorted(data.pos[:, 2].contiguous(), t),
++                                  0, data.num_nodes).item())
++        index0 = int(torch.clamp(torch.searchsorted(data.pos[:, 2].contiguous(), t - window_s),
++                                  0, data.num_nodes - 1).item())
++ 
+         for key, item in data:
+             if torch.is_tensor(item) and item.size(0) == data.num_nodes and item.size(0) != 1:
+-                data[key] = item[index0:index1, :]
+-
+-        # Coarsen graph by uniformly sampling n points from the event point cloud.
+-        data = self.sub_sampling(data, n_samples=params["n_samples"], sub_sample=params["sampling"])
+-
+-        # Re-weight temporal vs. spatial dimensions to account for different resolutions.
++                data[key] = item[index0:index1]
++ 
++        data.num_nodes = data.x.size(0)
++ 
++        data = NCaltech101.sub_sampling(data, n_samples=preproc_params["n_samples"],
++                                        sub_sample=preproc_params["sampling"])
++ 
++        data.num_nodes = data.x.size(0)
++ 
++        # Normalize time to [0, 1]
+         data.pos[:, 2] = normalize_time(data.pos[:, 2])
+-        # Radius graph generation.
+-        data.edge_index = radius_graph(data.pos, r=params["r"], max_num_neighbors=params["d_max"])
+-        return data
+-
+-    @staticmethod
+-    def sub_sampling(data: Data, n_samples: int, sub_sample: bool) -> Data:
+-        if sub_sample:
+-            sampler = FixedPoints(num=n_samples, allow_duplicates=False, replace=False)
+-            return sampler(data)
+-        else:
+-            sample_idx = np.arange(n_samples)
+-            for key, item in data:
+-                if torch.is_tensor(item) and item.size(0) != 1:
+-                    data[key] = item[sample_idx]
+-            return data
+-
+-    #########################################################################################################
+-    # Files #################################################################################################
+-    #########################################################################################################
+-    def raw_files(self, mode: str) -> List[str]:
+-        return glob.glob(os.path.join(self.root, mode, "*", "*.bin"), recursive=True)
+-
+-    def processed_files(self, mode: str) -> List[str]:
+-        processed_dir = os.path.join(self.root, "processed")
+-        return glob.glob(os.path.join(processed_dir, mode, "*", "*.bin"))
+-
+-    @property
+-    def classes(self) -> List[str]:
+-        return os.listdir(os.path.join(self.root, "raw"))
++ 
++        # Build graph on spatial coordinates only (x, y)
++        data.edge_index = radius_graph(data.pos[:, :2], r=preproc_params["r"],
++                                       max_num_neighbors=preproc_params["d_max"])
++ 
++        # Build 3D spatio-temporal edge features (dx, dy, dt) normalized per-dimension
++        src, dst = data.edge_index
++        delta = data.pos[dst] - data.pos[src]  # [E, 3]
++        max_abs = delta.abs().max(dim=0).values.clamp(min=1e-6)
++        data.edge_attr = ((delta / (2 * max_abs)) + 0.5).float().clamp(0.0, 1.0)
++ 
++        torch.save(data, pf)
++    except Exception as e:
++        logging.warning(f"Failed to process {rf}: {e}")'''
+\ No newline at end of file
+diff --git a/aegnn/datasets/ncars.py b/aegnn/datasets/ncars.py
+index 85d5613..a3f7ebf 100644
+--- a/aegnn/datasets/ncars.py
++++ b/aegnn/datasets/ncars.py
+@@ -1,65 +1,289 @@
+ import glob
++import multiprocessing as mp
+ import numpy as np
+ import os
+ import torch
+ 
+ from torch_geometric.data import Data
+ from torch_geometric.nn.pool import radius_graph
++from tqdm import tqdm
+ from typing import Callable, List, Optional, Union
+ 
+-from .utils.normalization import normalize_time
+ from .ncaltech101 import NCaltech101
+ 
+ 
++# ── paths ──────────────────────────────────────────────────────────────────────
++_TRAIN_DIR     = os.path.join(os.environ.get("CEGNN_DATA_ROOT", "data"), "ncars/n-cars_train")
++_TEST_DIR      = os.path.join(os.environ.get("CEGNN_DATA_ROOT", "data"), "ncars/n-cars_test")
++_PROCESSED_DIR = os.path.join(os.environ.get("CEGNN_DATA_ROOT", "data"), "ncars_processedzzz")
++# ──────────────────────────────────────────────────────────────────────────────
++
++
++# ========================= CORRECT EVENT READER =========================
++'''def _read_prophesee_dat(path: str):
++    with open(path, "rb") as f:
++        raw = np.fromfile(f, dtype=np.uint32)
++
++    #  FIX: ensure even length
++    if len(raw) % 2 != 0:
++        raw = raw[:-1]
++
++    t = raw[0::2].astype(np.float32)
++    data = raw[1::2]
++
++    # decode
++    x = data & 0x7F
++    y = (data >> 7) & 0x7F
++    p = (data >> 14) & 0x1
++    p = p.astype(np.float32)
++    p = p * 2.0 - 1.0   # convert {0,1} → {-1,+1}
++
++    # normalize time
++    t = t - t.min()
++    t = t / (t.max() - t.min() + 1e-6)
++
++    # IMPORTANT: scale time to match spatial range
++    t = t * 120.0
++
++    return (
++        x.astype(np.float32),
++        y.astype(np.float32),
++        t.astype(np.float32),
++        p.astype(np.float32),
++    )'''
++
++
++def _read_prophesee_dat(path: str):
++    """Correct Prophesee .dat reader for ATIS sensor (N-Cars format)."""
++    with open(path, "rb") as f:
++        # Skip ASCII header (lines starting with %)
++        while True:
++            pos = f.tell()
++            line = f.readline()
++            if not line.startswith(b'%'):
++                f.seek(pos)
++                break
++        # After header: 2 bytes (event_type, event_size) then events
++        ev_type = np.frombuffer(f.read(1), dtype=np.uint8)[0]
++        ev_size = np.frombuffer(f.read(1), dtype=np.uint8)[0]
++        # Each event: 8 bytes -> (t: uint32, data: uint32)
++        raw = np.frombuffer(f.read(), dtype=np.uint32)
++    
++    if len(raw) % 2 != 0:
++        raw = raw[:-1]
++    
++    t = raw[0::2].astype(np.float32)
++    data = raw[1::2]
++    
++    # ATIS encoding: x[0:14], y[14:28], p[28]
++    x = (data & 0x3FFF).astype(np.float32)             # bits 0-13
++    y = ((data >> 14) & 0x3FFF).astype(np.float32)     # bits 14-27
++    p = ((data >> 28) & 0x1).astype(np.float32)        # bit 28
++    p = p * 2.0 - 1.0   # {0,1} -> {-1,+1}
++    
++    # Filter to N-Cars sensor bounds (it's smaller than full ATIS)
++    mask = (x < 120) & (y < 100)
++    x, y, t, p = x[mask], y[mask], t[mask], p[mask]
++    
++    # Normalize time
++    if len(t) > 1:
++        t = t - t.min()
++        t = t / (t.max() + 1e-6) * 120.0
++    
++    return x, y, t.astype(np.float32), p
++
++
++# ========================= DATASET CLASS =========================
+ class NCars(NCaltech101):
+ 
+-    def __init__(self, batch_size: int = 64, shuffle: bool = True, num_workers: int = 8, pin_memory: bool = False,
+-                 transform: Optional[Callable[[Data], Data]] = None):
++    def __init__(self, batch_size: int = 64, shuffle: bool = True, num_workers: int = 8,
++                 pin_memory: bool = False, transform: Optional[Callable[[Data], Data]] = None):
+         super(NCars, self).__init__(batch_size, shuffle, num_workers, pin_memory=pin_memory, transform=transform)
+-        self.dims = (120, 100)  # overwrite image shape
+-        pre_processing_params = {"r": 3.0, "d_max": 32, "n_samples": 10000, "sampling": True}
++        self.dims = (120, 100)
++
++        # ✅ updated params
++        pre_processing_params = {
++            "r": 3.0,
++            "d_max": 32,
++            "n_samples": 10000,
++            "sampling": True
++        }
++
+         self.save_hyperparameters({"preprocessing": pre_processing_params})
+ 
+-    def read_annotations(self, raw_file: str) -> Optional[np.ndarray]:
++    def read_annotations(self, raw_file: str):
+         return None
+ 
+     @staticmethod
+-    def read_label(raw_file: str) -> Optional[Union[str, List[str]]]:
+-        label_file = os.path.join(raw_file, "is_car.txt")
+-        with open(label_file, "r") as f:
+-            label_txt = f.read().replace(" ", "").replace("\n", "")
+-        return "car" if label_txt == "1" else "background"
++    def read_label(raw_file: str):
++        parent = os.path.basename(os.path.dirname(raw_file))
++        return "car" if parent == "cars" else "background"
+ 
+     @staticmethod
+     def load(raw_file: str) -> Data:
+-        events_file = os.path.join(raw_file, "events.txt")
+-        events = torch.from_numpy(np.loadtxt(events_file)).float().cuda()
+-        x, pos = events[:, -1:], events[:, :3]
+-        return Data(x=x, pos=pos)
++        x_arr, y_arr, t_arr, p_arr = _read_prophesee_dat(raw_file)
++
++        events = np.column_stack((x_arr, y_arr, t_arr, p_arr))
++        events = torch.from_numpy(events).float()
++
++        pol = events[:, 3:4]
++        pos = events[:, :3]
++
++        return Data(x=pol, pos=pos)
+ 
+     def pre_transform(self, data: Data) -> Data:
+         params = self.hparams.preprocessing
+ 
+-        # Re-weight temporal vs. spatial dimensions to account for different resolutions.
+-        data.pos[:, 2] = normalize_time(data.pos[:, 2])
++        # ❌ removed normalize_time (already done)
++
++        data = self.sub_sampling(data,
++                                n_samples=params["n_samples"],
++                                sub_sample=params["sampling"])
+ 
+-        # Coarsen graph by uniformly sampling n points from the event point cloud.
+-        data = self.sub_sampling(data, n_samples=params["n_samples"], sub_sample=params["sampling"])
++        data.edge_index = radius_graph(
++            data.pos,
++            r=params["r"],
++            max_num_neighbors=params["d_max"]
++        )
+ 
+-        # Radius graph generation.
+-        data.edge_index = radius_graph(data.pos, r=params["r"], max_num_neighbors=params["d_max"])
+         return data
+ 
+-    #########################################################################################################
+-    # Files #################################################################################################
+-    #########################################################################################################
++    def _prepare_dataset(self, mode: str):
++        out_dir = os.path.join(_PROCESSED_DIR, "train" if mode == "train" else "test")
++        raw_files = self.raw_files(mode)
++        class_dict = {cls: i for i, cls in enumerate(self.classes)}
++
++        jobs = []
++        for rf in raw_files:
++            parent = os.path.basename(os.path.dirname(rf))
++            base = os.path.splitext(os.path.basename(rf))[0]
++
++            fname = f"{parent}_{base}.pt"
++            pf = os.path.join(out_dir, fname)
++            if not os.path.exists(pf):
++                jobs.append((rf, pf, class_dict, self.hparams.preprocessing))
++
++        if not jobs:
++            print(f"All files already processed for {mode}")
++            return
++
++        print(f"Processing {len(jobs)} files for {mode}")
++        os.makedirs(out_dir, exist_ok=True)
++
++        n_workers = min(self.num_workers or os.cpu_count(), len(jobs))
++        with mp.Pool(processes=n_workers) as pool:
++            for _ in tqdm(pool.imap_unordered(_process_one, jobs, chunksize=1),
++                          total=len(jobs)):
++                pass
++
+     def raw_files(self, mode: str) -> List[str]:
+-        return glob.glob(os.path.join(self.root, mode, "*"))
++        raw_dir = _TRAIN_DIR if mode == "train" else _TEST_DIR
++        return glob.glob(os.path.join(raw_dir, "*", "*.dat"))
+ 
+     def processed_files(self, mode: str) -> List[str]:
+-        processed_dir = os.path.join(self.root, "processed")
+-        return glob.glob(os.path.join(processed_dir, mode, "*"))
++        out_dir = os.path.join(_PROCESSED_DIR, "train" if mode == "train" else "test")
++        return glob.glob(os.path.join(out_dir, "*.pt"))
+ 
+     @property
+     def classes(self) -> List[str]:
+         return ["car", "background"]
++
++
++# ========================= CORE PROCESS =========================
++def _process_one(args):
++    rf, pf, class_dict, params = args
++
++    try:
++        # ───────── LOAD ─────────
++        x_arr, y_arr, t_arr, p_arr = _read_prophesee_dat(rf)
++
++        events = np.column_stack((x_arr, y_arr, t_arr, p_arr))
++        events = torch.from_numpy(events).float()
++
++        pol = events[:, 3:4]
++        pos = events[:, :3]
++
++        data = Data(x=pol, pos=pos)
++
++        # ───────── LABEL ─────────
++        parent = os.path.basename(os.path.dirname(rf))
++
++        if parent == "cars":
++            label = 1
++        elif parent == "background":
++            label = 0
++        else:
++            raise ValueError(f"Unknown class: {parent}")
++
++        data.y = torch.tensor([label])
++
++        data.file_id = os.path.basename(rf)
++
++        if data.num_nodes < 2:
++            return
++
++        # ───────── SORT BY TIME ─────────
++        order = data.pos[:, 2].argsort()
++        data.pos = data.pos[order]
++        data.x = data.x[order]
++
++        # 🔥 TEMPORAL WINDOWING (ADD THIS)
++        #t = data.pos[:, 2]
++        #t_max = t.max()
++
++        #mask = t > (t_max * 0.4)
++
++        #data.pos = data.pos[mask]
++        #data.x = data.x[mask]
++
++        # ───────── UNIFORM SAMPLING ─────────
++        num_nodes = data.pos.size(0)
++        n_samples = params["n_samples"]
++
++        if num_nodes > n_samples:
++            K = 10  # keep 1 out of every 10 events
++            idx = torch.arange(0, num_nodes, step=K)
++
++            # limit max nodes
++            if len(idx) > n_samples:
++                idx = idx[:n_samples]
++        else:
++            idx = torch.arange(num_nodes)
++
++        data.pos = data.pos[idx]
++        data.x = data.x[idx]
++
++        # ───────── GRAPH ─────────
++        data.edge_index = radius_graph(
++            data.pos,
++            r=params["r"],
++            max_num_neighbors=params["d_max"],
++            loop=False
++        )
++
++        # 🔥 NEW: TEMPORAL FILTER
++        #src, dst = data.edge_index
++        #dt = torch.abs(data.pos[dst, 2] - data.pos[src, 2])
++
++        #t_thresh = 10.0   # 🔥 KEY PARAMETER (start with 3.0)
++
++        #mask = dt < t_thresh
++
++        #data.edge_index = data.edge_index[:, mask]
++
++        if data.edge_index.size(1) == 0:
++            print(f"[SKIPPED] {rf}", flush=True)
++            return
++
++        # ───────── EDGE FEATURES ─────────
++        src, dst = data.edge_index
++        delta = data.pos[dst] - data.pos[src]
++
++        edge_attr = delta / params["r"]
++        data.edge_attr = edge_attr.float()
++
++        # ───────── SAVE ─────────
++        torch.save(data, pf)
++
++    except Exception as e:
++        print(f"[ERROR] {rf}: {e}", flush=True)
+\ No newline at end of file
+diff --git a/aegnn/models/layer/max_pool_x.py b/aegnn/models/layer/max_pool_x.py
+index d63d26b..28906d6 100644
+--- a/aegnn/models/layer/max_pool_x.py
++++ b/aegnn/models/layer/max_pool_x.py
+@@ -7,9 +7,12 @@ from typing import List, Optional, Tuple, Union
+ 
+ class MaxPoolingX(torch.nn.Module):
+ 
+-    def __init__(self, voxel_size: List[int], size: int):
+-        super(MaxPoolingX, self).__init__()
+-        self.voxel_size = voxel_size
++    def __init__(self, voxel_size, size: int):
++        super().__init__()
++        if torch.is_tensor(voxel_size):
++            self.voxel_size = voxel_size.tolist()
++        else:
++            self.voxel_size = list(voxel_size)
+         self.size = size
+ 
+     def forward(self, x: torch.Tensor, pos: torch.Tensor, batch: Optional[torch.Tensor] = None
+diff --git a/aegnn/models/networks/graph_res.py b/aegnn/models/networks/graph_res.py
+index b46502a..6ab11e2 100644
+--- a/aegnn/models/networks/graph_res.py
++++ b/aegnn/models/networks/graph_res.py
+@@ -1,8 +1,7 @@
+ import torch
++import torch.nn.functional as F
+ import torch_geometric
+-
+ from torch.nn import Linear
+-from torch.nn.functional import elu
+ from torch_geometric.nn.conv import SplineConv
+ from torch_geometric.nn.norm import BatchNorm
+ from torch_geometric.transforms import Cartesian
+@@ -10,72 +9,335 @@ from torch_geometric.transforms import Cartesian
+ from aegnn.models.layer import MaxPooling, MaxPoolingX
+ 
+ 
++_EDGE_ATTR_R = 5.0  # must match the radius_graph r used at preprocessing time
++                     # (ncaltech101.py). BUGFIX: normalizing by the per-graph max
++                     # abs delta (as the original inline comment below claimed to
++                     # replicate) makes edge_attr scale-invariant under a uniform
++                     # rescale of pos[:,2] -- silently destroying any rate-shift
++                     # signal a caller tries to inject via T_rho(E). Using the
++                     # fixed global r instead preserves it, matching what the
++                     # preprocessing script's own "FIX 7" comment already does.
++
++
++def _build_edge_attr_cartesian(pos, edge_index):
++    """Replicate Cartesian(norm=True, cat=False) inline."""
++    if edge_index.size(1) == 0:
++        return torch.zeros((0, pos.size(1)), dtype=torch.float32, device=pos.device)
++    src, dst = edge_index
++    delta = pos[dst] - pos[src]
++    delta = (delta / (2 * _EDGE_ATTR_R)) + 0.5
++    return delta.clamp(0.0, 1.0).float()
++
++
++def _cartesian_transform(data):
++    data.edge_attr = _build_edge_attr_cartesian(data.pos, data.edge_index)
++    return data
++
++
+ class GraphRes(torch.nn.Module):
++    """
++    Original AEGNN GraphRes — fixed for your environment.
++    Changes vs paper code:
++      - Inline Cartesian edge_attr (avoids Cartesian transform bug)
++      - LayerNorm instead of BatchNorm (stable with variable graph sizes)
++      - pool7 voxel size fixed for ncars img dims
++      - NaN guards after pool ops
++    """
++
++    def __init__(self, dataset, input_shape: torch.Tensor, num_outputs: int,
++                 pooling_size=(16, 12), bias: bool = False, root_weight: bool = False,
++                 dropout: float = 0.0, edge_dropout: float = 0.0, edge_dim: int = None):
++        super().__init__()
++        assert len(input_shape) == 3
+ 
+-    def __init__(self, dataset, input_shape: torch.Tensor, num_outputs: int, pooling_size=(16, 12),
+-                 bias: bool = False, root_weight: bool = False):
+-        super(GraphRes, self).__init__()
+-        assert len(input_shape) == 3, "invalid input shape, should be (img_width, img_height, dim)"
+-        dim = int(input_shape[-1])
++        dim = 3   # x, y, t
++        img_w, img_h = float(input_shape[0]), float(input_shape[1])
+ 
+-        # Set dataset specific hyper-parameters.
+         if dataset == "ncars":
+             kernel_size = 2
+             n = [1, 8, 16, 16, 16, 32, 32, 32, 32]
+             pooling_outputs = 32
+-        elif dataset == "ncaltech101" or dataset == "gen1":
++            pooling_size = (8.0, 8.0)
++            pool7_voxel = [img_w / 2.0, img_h / 2.0]   # [60, 50] for 120x100
++            pool7_size = 16
++        elif dataset in ("ncaltech101", "gen1"):
+             kernel_size = 8
+             n = [1, 16, 32, 32, 32, 128, 128, 128]
+             pooling_outputs = 128
++            pool7_voxel = [img_w / 4.0, img_h / 4.0]
++            pool7_size = 16
+         else:
+             raise NotImplementedError(f"No model parameters for dataset {dataset}")
+ 
++        self.dropout_p = dropout
++
+         self.conv1 = SplineConv(n[0], n[1], dim=dim, kernel_size=kernel_size, bias=bias, root_weight=root_weight)
+-        self.norm1 = BatchNorm(in_channels=n[1])
++        self.norm1 = torch.nn.LayerNorm(n[1])
+         self.conv2 = SplineConv(n[1], n[2], dim=dim, kernel_size=kernel_size, bias=bias, root_weight=root_weight)
+-        self.norm2 = BatchNorm(in_channels=n[2])
+-
++        self.norm2 = torch.nn.LayerNorm(n[2])
+         self.conv3 = SplineConv(n[2], n[3], dim=dim, kernel_size=kernel_size, bias=bias, root_weight=root_weight)
+-        self.norm3 = BatchNorm(in_channels=n[3])
++        self.norm3 = torch.nn.LayerNorm(n[3])
+         self.conv4 = SplineConv(n[3], n[4], dim=dim, kernel_size=kernel_size, bias=bias, root_weight=root_weight)
+-        self.norm4 = BatchNorm(in_channels=n[4])
+-
++        self.norm4 = torch.nn.LayerNorm(n[4])
+         self.conv5 = SplineConv(n[4], n[5], dim=dim, kernel_size=kernel_size, bias=bias, root_weight=root_weight)
+-        self.norm5 = BatchNorm(in_channels=n[5])
+-        self.pool5 = MaxPooling(pooling_size, transform=Cartesian(norm=True, cat=False))
++        self.norm5 = torch.nn.LayerNorm(n[5])
++
++        self.pool5 = MaxPooling(pooling_size, transform=_cartesian_transform)
+ 
+         self.conv6 = SplineConv(n[5], n[6], dim=dim, kernel_size=kernel_size, bias=bias, root_weight=root_weight)
+-        self.norm6 = BatchNorm(in_channels=n[6])
++        self.norm6 = torch.nn.LayerNorm(n[6])
+         self.conv7 = SplineConv(n[6], n[7], dim=dim, kernel_size=kernel_size, bias=bias, root_weight=root_weight)
+-        self.norm7 = BatchNorm(in_channels=n[7])
++        self.norm7 = torch.nn.LayerNorm(n[7])
+ 
+-        self.pool7 = MaxPoolingX(input_shape[:2] // 4, size=16)
+-        self.fc = Linear(pooling_outputs * 16, out_features=num_outputs, bias=bias)
++        self.pool7 = MaxPoolingX(voxel_size=pool7_voxel, size=pool7_size)
++        self.fc = Linear(pooling_outputs * pool7_size, num_outputs, bias=True)
+ 
+     def forward(self, data: torch_geometric.data.Batch) -> torch.Tensor:
+-        data.x = elu(self.conv1(data.x, data.edge_index, data.edge_attr))
+-        data.x = self.norm1(data.x)
+-        data.x = elu(self.conv2(data.x, data.edge_index, data.edge_attr))
+-        data.x = self.norm2(data.x)
++        data.x = data.x.float()
++        data.pos = data.pos.float()
+ 
++        # Build edge_attr fresh each forward (avoids stale/wrong attr issues)
++        data.edge_attr = _build_edge_attr_cartesian(data.pos, data.edge_index)
++
++        # --- Block 1-2 ---
++        data.x = F.elu(self.norm1(self.conv1(data.x, data.edge_index, data.edge_attr)))
++        data.x = F.elu(self.norm2(self.conv2(data.x, data.edge_index, data.edge_attr)))
++
++        # --- Block 3-4 with residual ---
+         x_sc = data.x.clone()
+-        data.x = elu(self.conv3(data.x, data.edge_index, data.edge_attr))
+-        data.x = self.norm3(data.x)
+-        data.x = elu(self.conv4(data.x, data.edge_index, data.edge_attr))
+-        data.x = self.norm4(data.x)
++        data.x = F.elu(self.norm3(self.conv3(data.x, data.edge_index, data.edge_attr)))
++        data.x = F.elu(self.norm4(self.conv4(data.x, data.edge_index, data.edge_attr)))
+         data.x = data.x + x_sc
+ 
+-        data.x = elu(self.conv5(data.x, data.edge_index, data.edge_attr))
+-        data.x = self.norm5(data.x)
+-        data = self.pool5(data.x, pos=data.pos, batch=data.batch, edge_index=data.edge_index, return_data_obj=True)
++        # --- Block 5 ---
++        data.x = F.elu(self.norm5(self.conv5(data.x, data.edge_index, data.edge_attr)))
++        data.x = torch.nan_to_num(data.x, nan=0.0)
++
++        # --- Pool 5 ---
++        data = self.pool5(data.x, pos=data.pos, batch=data.batch,
++                          edge_index=data.edge_index, return_data_obj=True)
++        data.num_nodes = data.x.size(0)
++
++        # Rebuild edge_attr after pooling (new graph structure)
++        data.edge_attr = _build_edge_attr_cartesian(data.pos, data.edge_index)
+ 
++        # --- Block 6-7 with residual ---
+         x_sc = data.x.clone()
+-        data.x = elu(self.conv6(data.x, data.edge_index, data.edge_attr))
+-        data.x = self.norm6(data.x)
+-        data.x = elu(self.conv7(data.x, data.edge_index, data.edge_attr))
+-        data.x = self.norm7(data.x)
++        data.x = F.elu(self.norm6(self.conv6(data.x, data.edge_index, data.edge_attr)))
++        data.x = F.elu(self.norm7(self.conv7(data.x, data.edge_index, data.edge_attr)))
+         data.x = data.x + x_sc
++        data.x = torch.nan_to_num(data.x, nan=0.0)
+ 
++        # --- Pool 7 (spatial grid -> fixed size) ---
+         x = self.pool7(data.x, pos=data.pos[:, :2], batch=data.batch)
+         x = x.view(-1, self.fc.in_features)
++        
++        if self.dropout_p > 0:
++            x = F.dropout(x, p=self.dropout_p, training=self.training)
++
+         return self.fc(x)
++        
++        
++'''import torch
++import torch.nn as nn
++import torch.nn.functional as F
++import torch_geometric
++from torch.nn import Linear, BatchNorm1d, LayerNorm
++from torch_geometric.data import Data
++from torch_geometric.nn.conv import SplineConv
++from torch_geometric.nn import global_mean_pool, global_max_pool
++from torch_geometric.utils import to_dense_batch
++
++from aegnn.models.layer import MaxPooling, MaxPoolingX
++
++try:
++    from mamba_ssm import Mamba
++    HAS_MAMBA = True
++except ImportError:
++    HAS_MAMBA = False
++    print("[WARN] mamba_ssm not available, using GRU fallback")
++
++
++def _build_edge_attr(pos, edge_index):
++    if edge_index.size(1) == 0:
++        return torch.zeros((0, 3), dtype=torch.float32, device=pos.device)
++    src, dst = edge_index
++    delta = pos[dst] - pos[src]
++    delta = torch.nan_to_num(delta, nan=0.0, posinf=1.0, neginf=-1.0)
++    max_abs = delta.abs().max(dim=0).values.clamp(min=1e-6)
++    ea = ((delta / (2 * max_abs)) + 0.5).clamp(0.0, 1.0).float()
++    return torch.nan_to_num(ea, nan=0.5)
++
++
++def _spatiotemporal_cartesian(data: Data) -> Data:
++    data.edge_attr = _build_edge_attr(data.pos, data.edge_index)
++    return data
++
++
++class MambaBlock(nn.Module):
++    """Mamba block with residual + LayerNorm. Falls back to GRU if mamba_ssm unavailable."""
++    def __init__(self, d_model, d_state=16, d_conv=4, expand=2):
++        super().__init__()
++        self.norm = LayerNorm(d_model)
++        if HAS_MAMBA:
++            self.ssm = Mamba(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand)
++        else:
++            # GRU fallback - bidirectional for symmetry
++            self.ssm = nn.GRU(d_model, d_model // 2, batch_first=True, bidirectional=True)
++
++    def forward(self, x, mask=None):
++        # x: [B, N, D]
++        residual = x
++        x = self.norm(x)
++        if HAS_MAMBA:
++            x = self.ssm(x)
++        else:
++            x, _ = self.ssm(x)
++        return residual + x
++
++
++class GraphRes(nn.Module):
++    """
++    Lightweight Graph-Mamba for ncars event classification.
++    
++    Pipeline:
++      1. Local: 2 SplineConv layers extract local spatial features
++      2. Coarsen: MaxPooling reduces graph size  
++      3. Global: Mamba processes events as sorted sequence (cheap O(N))
++      4. Readout: mean+max pool + small FC
++    
++    ~400K params, much faster than the 1.2M conv-heavy version.
++    """
++
++    def __init__(
++        self,
++        dataset,
++        input_shape: torch.Tensor,
++        num_outputs: int,
++        pooling_size=None,
++        bias: bool = True,
++        root_weight: bool = True,
++        dropout: float = 0.5,
++        edge_dropout: float = 0.0,
++        edge_dim: int = None,
++        d_model: int = 96,           # mamba hidden dim
++        n_mamba_layers: int = 4,     # how many mamba blocks
++    ):
++        super().__init__()
++        assert len(input_shape) == 3
++
++        dim = 3
++        kernel_size = 3
++        img_w, img_h = float(input_shape[0]), float(input_shape[1])
++        in_dim = int(input_shape[2])
++
++        if pooling_size is None:
++            pooling_size = (8.0, 8.0)
++        pool_voxel = [img_w / 2.0, img_h / 2.0]
++
++        self.dropout_p = dropout
++        self.d_model = d_model
++
++        # ---- Input lift ----
++        self.input_proj = Linear(in_dim, 48, bias=True)
++        self.input_bn = BatchNorm1d(48)
++
++        # ---- Local spatial encoder (2 SplineConvs only) ----
++        self.conv1 = SplineConv(48, 64, dim=dim, kernel_size=kernel_size, bias=bias, root_weight=root_weight)
++        self.bn1 = BatchNorm1d(64)
++        self.conv2 = SplineConv(64, d_model, dim=dim, kernel_size=kernel_size, bias=bias, root_weight=root_weight)
++        self.bn2 = BatchNorm1d(d_model)
++
++        # ---- Graph coarsening ----
++        self.pool_mid = MaxPooling(pooling_size, transform=_spatiotemporal_cartesian)
++
++        # ---- Mamba sequence encoder (the workhorse) ----
++        self.mamba_blocks = nn.ModuleList([
++            MambaBlock(d_model) for _ in range(n_mamba_layers)
++        ])
++        self.mamba_norm = LayerNorm(d_model)
++
++        # ---- Readout ----
++        # mean + max global pool only (Mamba already aggregated globally)
++        fc_in = d_model * 2
++        self.fc1 = Linear(fc_in, 128, bias=True)
++        self.bn_fc = BatchNorm1d(128)
++        self.fc2 = Linear(128, num_outputs, bias=True)
++
++        self._init_weights()
++
++    def _init_weights(self):
++        for m in self.modules():
++            if isinstance(m, Linear):
++                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
++                if m.bias is not None:
++                    nn.init.zeros_(m.bias)
++
++    def forward(self, data: torch_geometric.data.Batch) -> torch.Tensor:
++        x = data.x.float()
++        pos = data.pos.float()
++        edge_index = data.edge_index
++        batch = data.batch
++
++        # ---- Input lift ----
++        x = F.relu(self.input_bn(self.input_proj(x)))
++
++        # ---- Local spatial encoding ----
++        ea = _build_edge_attr(pos, edge_index)
++        x = F.relu(self.bn1(self.conv1(x, edge_index, ea)))
++        x = F.relu(self.bn2(self.conv2(x, edge_index, ea)))
++        x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
++
++        # ---- Graph coarsening ----
++        data.x = x
++        data.pos = pos
++        data.edge_index = edge_index
++        data.batch = batch
++        data = self.pool_mid(data.x, pos=data.pos, batch=data.batch,
++                             edge_index=data.edge_index, return_data_obj=True)
++        data.num_nodes = data.x.size(0)
++        x = data.x
++        pos = data.pos
++        batch = data.batch
++
++        # ---- Sort by time within each batch (CRITICAL for Mamba) ----
++        # pos[:, 2] is time. Sort each graph's nodes by time so Mamba sees temporal order.
++        # We sort globally by (batch_idx, time) which preserves batch grouping.
++        sort_key = batch.float() * 1e9 + pos[:, 2]
++        order = sort_key.argsort()
++        x = x[order]
++        batch_sorted = batch[order]
++        pos_sorted = pos[order]
++
++        # ---- Convert sparse [N_total, D] to dense [B, N_max, D] ----
++        # to_dense_batch handles padding automatically and gives us a mask
++        x_dense, mask = to_dense_batch(x, batch_sorted)  # [B, N_max, D], [B, N_max]
++
++        # ---- Mamba blocks ----
++        for block in self.mamba_blocks:
++            x_dense = block(x_dense, mask=mask)
++
++        x_dense = self.mamba_norm(x_dense)
++
++        # Zero out padded positions before pooling
++        x_dense = x_dense * mask.unsqueeze(-1).float()
++
++        # ---- Readout: masked mean + masked max ----
++        counts = mask.sum(dim=1, keepdim=True).clamp(min=1).float()
++        x_mean = x_dense.sum(dim=1) / counts                      # [B, D]
++        x_max = x_dense.masked_fill(~mask.unsqueeze(-1), -1e4).max(dim=1).values  # [B, D]
++
++        h = torch.cat([x_mean, x_max], dim=1)  # [B, 2D]
++
++        # ---- FC head ----
++        h = F.dropout(h, p=self.dropout_p, training=self.training)
++        h = F.relu(self.bn_fc(self.fc1(h)))
++        h = F.dropout(h, p=self.dropout_p, training=self.training)
++        return self.fc2(h)
++
++
++
++
++
++
++'''
+\ No newline at end of file

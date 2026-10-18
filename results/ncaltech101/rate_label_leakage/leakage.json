@@ -1,0 +1,18 @@
+{
+  "dataset": "ncaltech101",
+  "n_test": 1742,
+  "n_classes": 101,
+  "log_rate_range_nats": 3.2639102935791016,
+  "anova_F": 9.783965153035101,
+  "anova_p": 1.2387533815281994e-107,
+  "class_entropy_nats": 4.180897799278725,
+  "mutual_information_nats": 0.2780981699845121,
+  "mi_fraction_of_entropy": 0.06651637598806857,
+  "mi_plugin_binned_biased_nats": 1.0064520324488364,
+  "between_class_variance_share": 0.37351982015221674,
+  "per_class_mean_span_nats": 1.4253220233050268,
+  "per_class_mean_std_nats": 0.3015189617899171,
+  "most_frequent_class_acc": 0.09184845005740529,
+  "rate_only_logreg_acc": 0.16475315729047071,
+  "rate_only_mlp_acc": 0.17221584385763491
+}

@@ -1,0 +1,61 @@
+# CEGNN config - N-Caltech101 (101 classes, ATIS 240x180, stratified 80/20 split)
+# Natural-rate preprocessing: timestamps keep their real duration (NO per-sample
+# time normalisation), so each sample's event rate survives into `log_lambda_raw`.
+# Paths expand ${CEGNN_DATA_ROOT} / ${CEGNN_RESULTS_ROOT} (inline defaults shown).
+
+paths:
+  raw_root:  ${CEGNN_DATA_ROOT:-data}/N-Caltech101/Caltech101
+  processed: ${CEGNN_DATA_ROOT:-data}/ncaltech101_v2_processed
+  results:   ${CEGNN_RESULTS_ROOT:-results}/ncaltech101
+
+dataset:
+  name: ncaltech101
+  num_classes: 101
+  spatial_dims: [240, 180]    # [W, H]
+  # t_unit converts ms -> graph-time-units (1.0 => 1 unit == 1 ms ~ 1 pixel).
+  t_unit: 1.0
+  split_seed: 42
+  split_train_frac: 0.8
+
+graph:
+  # Average N-Caltech101 sample is ~300 ms, so an isotropic radius of 6 spans
+  # 6 ms x 6 px x 6 px.
+  r: 6.0
+  d_max: 32
+  n_samples: 10000
+  subsample_K: 25
+
+model:
+  sa1_ratio: 0.5
+  sa1_radius: 20.0
+  sa2_ratio: 0.5
+  sa2_radius: 40.0
+  sa3_ratio: 0.5
+  sa3_radius: 80.0
+  hidden: [32, 64, 128]
+  global_dim: 256
+  head_hidden: 128
+  dropout: 0.5
+
+train:
+  batch_size: 16
+  epochs: 80
+  lr: 1.0e-3
+  lr_step: 30
+  lr_gamma: 0.1
+  grad_clip: 1.0
+  patience: 15
+  num_workers: 4
+  seed: 42
+  augment:
+    hflip_prob: 0.5
+    polflip_prob: 0.3
+
+rate_adaptive:
+  # Synthetic rate grid used by scripts/eval/eval_synthetic_rates.py (natural-rate
+  # buckets, the headline metric, need no grid).
+  test_rates: [0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
+  train_rates: [0.5, 1.0, 2.0]
+  reference_rate: 1.0
+  alpha_R: -0.333
+  target_rate: null

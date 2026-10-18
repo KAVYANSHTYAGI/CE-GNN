@@ -1,0 +1,18 @@
+# Known-good environment (the one all paper results were produced with).
+#   conda env create -f environment.yml && conda activate cegnn
+# torch 1.11 + CUDA 11.3 + PyG 2.0.4 are old but pinned on purpose: checkpoints and numbers
+# were produced with them. torch-cluster's `fps` (random start) is used in the backbone.
+name: cegnn
+channels: [pytorch, pyg, conda-forge, defaults]
+dependencies:
+  - python=3.8
+  - pytorch=1.11.0
+  - torchvision=0.12.0
+  - cudatoolkit=11.3
+  - pyg=2.0.4
+  - pytorch-scatter
+  - pytorch-sparse
+  - pytorch-cluster
+  - pip
+  - pip:
+      - -r requirements.txt

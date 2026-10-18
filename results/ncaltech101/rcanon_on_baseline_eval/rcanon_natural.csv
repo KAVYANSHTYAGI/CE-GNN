@@ -1,0 +1,8 @@
+mode,bucket,log_lambda_lo,log_lambda_hi,n,test_acc,mean_log_rho
+natural_bucket,0,10.7898,12.1718,249,0.494,-1.346
+natural_bucket,1,12.172,12.4539,249,0.4578,-1.2783
+natural_bucket,2,12.4558,12.6712,249,0.4739,-1.1218
+natural_bucket,3,12.6713,12.8509,249,0.4618,-0.9824
+natural_bucket,4,12.8513,13.0446,249,0.4578,-0.8896
+natural_bucket,5,13.0451,13.2834,249,0.4378,-0.831
+natural_bucket,6,13.2847,14.0537,248,0.3427,-0.7481

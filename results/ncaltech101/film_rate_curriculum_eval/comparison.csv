@@ -1,0 +1,8 @@
+model,ckpt,test_graph_mode,rate_factor,test_acc,test_loss,n
+film_rate_curriculum,results_ncaltech_v2/film_rate_curriculum/best.ckpt,fixed,0.125,0.1274,5.8513,1742
+film_rate_curriculum,results_ncaltech_v2/film_rate_curriculum/best.ckpt,fixed,0.25,0.5488,1.8813,1742
+film_rate_curriculum,results_ncaltech_v2/film_rate_curriculum/best.ckpt,fixed,0.5,0.6441,1.4672,1742
+film_rate_curriculum,results_ncaltech_v2/film_rate_curriculum/best.ckpt,fixed,1.0,0.6757,1.4219,1742
+film_rate_curriculum,results_ncaltech_v2/film_rate_curriculum/best.ckpt,fixed,2.0,0.6567,1.4339,1742
+film_rate_curriculum,results_ncaltech_v2/film_rate_curriculum/best.ckpt,fixed,4.0,0.5626,1.8592,1742
+film_rate_curriculum,results_ncaltech_v2/film_rate_curriculum/best.ckpt,fixed,8.0,0.3031,3.5221,1742

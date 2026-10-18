@@ -1,0 +1,18 @@
+{
+  "dataset": "dvsgesture",
+  "n_test": 264,
+  "n_classes": 11,
+  "log_rate_range_nats": 2.8405303955078125,
+  "anova_F": 19.745837680698457,
+  "anova_p": 9.003757954171642e-27,
+  "class_entropy_nats": 2.3978952727983707,
+  "mutual_information_nats": 0.47778774710739924,
+  "mi_fraction_of_entropy": 0.19925296676940174,
+  "mi_plugin_binned_biased_nats": 0.932947954308248,
+  "between_class_variance_share": 0.4383498830827448,
+  "per_class_mean_span_nats": 1.0620695352554321,
+  "per_class_mean_std_nats": 0.35118332161898713,
+  "most_frequent_class_acc": 0.09090909090909091,
+  "rate_only_logreg_acc": 0.19696969696969696,
+  "rate_only_mlp_acc": 0.16666666666666666
+}

@@ -1,0 +1,15 @@
+model,ckpt,test_graph_mode,rate_factor,test_acc,test_loss,n
+baseline,results_ncaltech_v2/baseline/best.ckpt,fixed,0.125,0.0534,128.9667,1742
+baseline,results_ncaltech_v2/baseline/best.ckpt,fixed,0.25,0.0534,51.7831,1742
+baseline,results_ncaltech_v2/baseline/best.ckpt,fixed,0.5,0.1108,12.628,1742
+baseline,results_ncaltech_v2/baseline/best.ckpt,fixed,1.0,0.6033,1.5651,1742
+baseline,results_ncaltech_v2/baseline/best.ckpt,fixed,2.0,0.2095,4.2459,1742
+baseline,results_ncaltech_v2/baseline/best.ckpt,fixed,4.0,0.0568,10.9614,1742
+baseline,results_ncaltech_v2/baseline/best.ckpt,fixed,8.0,0.0327,15.5463,1742
+ra_aug_only,results_ncaltech_v2/ra_aug_only/best.ckpt,fixed,0.125,0.0838,6.3065,1742
+ra_aug_only,results_ncaltech_v2/ra_aug_only/best.ckpt,fixed,0.25,0.4736,2.2077,1742
+ra_aug_only,results_ncaltech_v2/ra_aug_only/best.ckpt,fixed,0.5,0.5924,1.655,1742
+ra_aug_only,results_ncaltech_v2/ra_aug_only/best.ckpt,fixed,1.0,0.6068,1.6166,1742
+ra_aug_only,results_ncaltech_v2/ra_aug_only/best.ckpt,fixed,2.0,0.5896,1.6748,1742
+ra_aug_only,results_ncaltech_v2/ra_aug_only/best.ckpt,fixed,4.0,0.527,1.9789,1742
+ra_aug_only,results_ncaltech_v2/ra_aug_only/best.ckpt,fixed,8.0,0.4328,2.5586,1742

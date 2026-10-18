@@ -1,0 +1,8 @@
+model,bucket,log_lambda_lo,log_lambda_hi,n,test_acc
+film_rate_curriculum,0,10.7898,12.1718,249,0.6747
+film_rate_curriculum,1,12.172,12.4539,249,0.7631
+film_rate_curriculum,2,12.4558,12.6712,249,0.7269
+film_rate_curriculum,3,12.6713,12.8509,249,0.7028
+film_rate_curriculum,4,12.8513,13.0446,249,0.6707
+film_rate_curriculum,5,13.0451,13.2834,249,0.6305
+film_rate_curriculum,6,13.2847,14.0537,248,0.5363

@@ -1,0 +1,8 @@
+model,rate_factor,test_acc,test_loss,n
+rptta_tent,0.125,0.3502,3.042,1742
+rptta_tent,0.25,0.4116,2.6297,1742
+rptta_tent,0.5,0.4868,2.2703,1742
+rptta_tent,1.0,0.5121,2.1306,1742
+rptta_tent,2.0,0.492,2.2247,1742
+rptta_tent,4.0,0.4437,2.4802,1742
+rptta_tent,8.0,0.4082,2.7216,1742

@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+# data & outputs (large; see docs/DATASETS.md)
+/data/
+/external/
+lightning_logs/
+*.out
+*.err
+/logs/

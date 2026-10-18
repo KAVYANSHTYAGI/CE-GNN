@@ -1,0 +1,18 @@
+{
+  "dataset": "dvslip",
+  "n_test": 4975,
+  "n_classes": 100,
+  "log_rate_range_nats": 4.109327793121338,
+  "anova_F": 19.71175974936719,
+  "anova_p": 5.933340279469625e-281,
+  "class_entropy_nats": 4.6051321801372005,
+  "mutual_information_nats": 0.20484936160914557,
+  "mi_fraction_of_entropy": 0.044482840795037185,
+  "mi_plugin_binned_biased_nats": 0.5317211221793543,
+  "between_class_variance_share": 0.2858674935768039,
+  "per_class_mean_span_nats": 1.0138684597793883,
+  "per_class_mean_std_nats": 0.2385985386540528,
+  "most_frequent_class_acc": 0.010050251256281407,
+  "rate_only_logreg_acc": 0.01527638190954774,
+  "rate_only_mlp_acc": 0.011055276381909548
+}

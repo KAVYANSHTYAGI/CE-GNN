@@ -1,0 +1,36 @@
+diff --git a/models/mamba_layer.py b/models/mamba_layer.py
+index 4bacda6..4d4ec10 100644
+--- a/models/mamba_layer.py
++++ b/models/mamba_layer.py
+@@ -3,7 +3,13 @@ import torch.nn as nn
+ from functools import partial
+ 
+ from mamba_ssm.modules.mamba_simple import Mamba
+-from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
++try:
++    # renamed layernorm.py -> layer_norm.py between mamba-ssm releases; only
++    # needed when fused_add_norm=True, which this repo's models never set,
++    # so make it optional rather than a hard dependency.
++    from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
++except ImportError:
++    RMSNorm = layer_norm_fn = rms_norm_fn = None
+ from timm.models.layers import DropPath
+ 
+ class MambaBlock(nn.Module):
+@@ -25,7 +31,15 @@ class MambaBlock(nn.Module):
+         The residual needs to be provided (except for the very first block).
+         """
+         super().__init__()
+-        mixer_cls = partial(Mamba, layer_idx=layer_idx, bimamba_type=bimamba_type, **ssm_cfg, **factory_kwargs)
++        # BUGFIX: bimamba_type (bidirectional scan) is not part of the
++        # official mamba-ssm API (pip install mamba-ssm) -- EventMamba's
++        # code was written against an unofficial fork that adds it. Rather
++        # than chase that fork, we use the standard unidirectional Mamba
++        # mixer here; bimamba_type is still accepted as a constructor arg
++        # (for call-site compatibility with eventmamba_v2.py/eventmamba_film.py)
++        # but no longer forwarded. This is a real, deliberate deviation from
++        # EventMamba's published bidirectional design.
++        mixer_cls = partial(Mamba, layer_idx=layer_idx, **ssm_cfg, **factory_kwargs)
+         self.residual_in_fp32 = residual_in_fp32
+         self.fused_add_norm = fused_add_norm
+         self.mixer = mixer_cls(dim)

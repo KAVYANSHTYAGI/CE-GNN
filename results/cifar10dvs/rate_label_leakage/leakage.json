@@ -1,0 +1,18 @@
+{
+  "dataset": "cifar10dvs",
+  "n_test": 2000,
+  "n_classes": 10,
+  "log_rate_range_nats": 1.787013053894043,
+  "anova_F": 34.05795066678803,
+  "anova_p": 2.969130045746204e-56,
+  "class_entropy_nats": 2.3025850929940455,
+  "mutual_information_nats": 0.09864150774915555,
+  "mi_fraction_of_entropy": 0.04283946250207511,
+  "mi_plugin_binned_biased_nats": 0.14857602256362662,
+  "between_class_variance_share": 0.13347210053400746,
+  "per_class_mean_span_nats": 0.3051225519180303,
+  "per_class_mean_std_nats": 0.10357986519628666,
+  "most_frequent_class_acc": 0.1,
+  "rate_only_logreg_acc": 0.138,
+  "rate_only_mlp_acc": 0.147
+}

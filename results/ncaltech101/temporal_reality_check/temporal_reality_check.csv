@@ -1,0 +1,16 @@
+model,ablation,acc,drop_pp
+baseline,identity,61.37,0.0
+baseline,time_shuffle,50.17,11.19
+baseline,time_reverse,18.89,42.48
+baseline,time_constant,2.07,59.3
+baseline,polarity_shuffle,61.19,0.17
+film_natural,identity,63.15,0.0
+film_natural,time_shuffle,50.23,12.92
+film_natural,time_reverse,20.49,42.65
+film_natural,time_constant,3.85,59.3
+film_natural,polarity_shuffle,62.8,0.34
+film_curriculum,identity,66.48,0.0
+film_curriculum,time_shuffle,54.54,11.94
+film_curriculum,time_reverse,27.78,38.69
+film_curriculum,time_constant,5.51,60.96
+film_curriculum,polarity_shuffle,66.13,0.34

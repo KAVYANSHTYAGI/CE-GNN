@@ -1,0 +1,18 @@
+{
+  "dataset": "ncars",
+  "n_test": 8607,
+  "n_classes": 2,
+  "log_rate_range_nats": 4.770444869995117,
+  "anova_F": 2.7516171369639215,
+  "anova_p": 0.09719256323723617,
+  "class_entropy_nats": 0.6929161638999408,
+  "mutual_information_nats": 0.0053753034241618815,
+  "mi_fraction_of_entropy": 0.007757509067053733,
+  "mi_plugin_binned_biased_nats": 0.00746182613847169,
+  "between_class_variance_share": 0.00031966734861232866,
+  "per_class_mean_span_nats": 0.034048780321858985,
+  "per_class_mean_std_nats": 0.017024390160929492,
+  "most_frequent_class_acc": 0.51074706634135,
+  "rate_only_logreg_acc": 0.5114441733472754,
+  "rate_only_mlp_acc": 0.5205065644243058
+}
