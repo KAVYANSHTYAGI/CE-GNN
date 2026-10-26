@@ -1,10 +1,23 @@
 cff-version: 1.2.0
-message: "If you use this code or the results, please cite it as below."
-title: "Rate as a Feature, Not a Nuisance: Curriculum-FiLM Event GNN (CEGNN)"
-# TODO(authors): fill in names, venue and DOI once the paper de-anonymises.
+message: "If you use this code or the results, please cite the paper."
+title: "Rate as a Feature, Not a Nuisance: Curriculum FiLM Training for Event-Based Graph Neural Networks"
 authors:
-  - name: "The CEGNN authors"
+  - family-names: Tyagi
+    given-names: Kavyansh
+  - family-names: Ziegler
+    given-names: Andreas
 version: 0.1.0
 date-released: 2026-10-17
 license: MIT
 repository-code: "https://github.com/KAVYANSHTYAGI/CE-GNN"
+preferred-citation:
+  type: article
+  title: "Rate as a Feature, Not a Nuisance: Curriculum FiLM Training for Event-Based Graph Neural Networks"
+  authors:
+    - family-names: Tyagi
+      given-names: Kavyansh
+    - family-names: Ziegler
+      given-names: Andreas
+  journal: "arXiv preprint arXiv:2610.26933"
+  year: 2026
+  url: "https://arxiv.org/abs/2610.26933"

@@ -1,6 +1,8 @@
 # CEGNN: Curriculum-FiLM Event GNN
 
-Code, trained models and raw results for *Rate as a Feature, Not a Nuisance*.
+Code, trained models and raw results for *Rate as a Feature, Not a Nuisance: Curriculum FiLM Training for Event-Based Graph Neural Networks*.
+
+Paper: [arXiv:2610.26933](https://arxiv.org/abs/2610.26933) ([PDF](https://arxiv.org/pdf/2610.26933))
 
 An event camera produces events at a rate that depends on scene motion, object texture, lighting and the
 sensor's own settings. On N-Caltech101, which was recorded with a single camera, the per-recording rate
@@ -162,10 +164,14 @@ tests/             pytest suite (three tests need data and the checkpoints and s
 ## Citation
 
 ```bibtex
-@misc{cegnn2026,
-  title  = {Rate as a Feature, Not a Nuisance: Curriculum-FiLM Event GNN},
-  author = {TODO},
-  year   = {2026}
+@misc{tyagi2026rate,
+  title         = {Rate as a Feature, Not a Nuisance: Curriculum FiLM Training for Event-Based Graph Neural Networks},
+  author        = {Tyagi, Kavyansh and Ziegler, Andreas},
+  year          = {2026},
+  eprint        = {2610.26933},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CV},
+  url           = {https://arxiv.org/abs/2610.26933}
 }
 ```
 
