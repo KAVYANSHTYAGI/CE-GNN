@@ -1,5 +1,9 @@
 # CEGNN: Curriculum-FiLM Event GNN
 
+[![arXiv](https://img.shields.io/badge/arXiv-2610.26933-b31b1b.svg)](https://arxiv.org/abs/2610.26933)
+[![ACCV 2026 AECV](https://img.shields.io/badge/ACCV%202026-AECV%20workshop-444.svg)](https://arxiv.org/abs/2610.26933)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Code, trained models and raw results for *Rate as a Feature, Not a Nuisance: Curriculum FiLM Training for Event-Based Graph Neural Networks*.
 
 Paper: [arXiv:2610.26933](https://arxiv.org/abs/2610.26933) ([PDF](https://arxiv.org/pdf/2610.26933))
